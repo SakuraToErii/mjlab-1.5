@@ -89,7 +89,7 @@ def make_navigation_actions() -> dict[str, ActionTermCfg]:
       entity_name="robot",
       policy_path=str(_POLICY_PATH),
       low_level_decimation=4,
-      low_level_actions=deepcopy(make_low_level_actions()["JointPositionAction"]),
+      low_level_actions=deepcopy(make_low_level_actions()["joint_pos"]),
       low_level_observations=make_low_level_inference_observations(),
       velocity_clip=((-0.5, 1.0), (-0.5, 0.5), (-0.5, 0.5)),
       debug_vis=True,

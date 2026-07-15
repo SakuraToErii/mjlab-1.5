@@ -1,22 +1,14 @@
 import inspect
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import cast
 
-import mujoco
 import pytest
 import torch
 
-from mjlab.actuator import (
-  BuiltinPdActuator,
-  BuiltinPdActuatorCfg,
-  BuiltinPositionActuatorCfg,
-)
+from mjlab.actuator import BuiltinPositionActuator, BuiltinPositionActuatorCfg
 from mjlab.asset_zoo.robots import get_g1_robot_cfg as get_stock_g1_robot_cfg
-from mjlab.entity import EntityCfg
 from mjlab.envs import ManagerBasedRlEnv
-from mjlab.scene import Scene, SceneCfg
-from mjlab.sim import MujocoCfg, Simulation, SimulationCfg
 from mjlab.tasks.navigation.config.g1.rl_cfg import navigation_ppo_runner_cfg
 from mjlab.tasks.navigation.mdp import (
   ArenaPose2dCommandCfg,
@@ -53,21 +45,16 @@ from mjlab.tasks.navigation.navigation_env_cfg import (
   make_navigation_v5_mixed_obstacle_env_cfg,
 )
 from mjlab.tasks.navigation_loco.config.g1.rl_cfg import low_level_ppo_runner_cfg
-from mjlab.tasks.navigation_loco.mdp import (
-  OffsetGridPatternCfg,
-  RandomizeContactMaterial,
-  UniformLevelVelocityCommandCfg,
-  restitution_to_damping_ratio,
-)
-from mjlab.tasks.navigation_loco.mdp.curriculums import (
-  _apply_tracking_std_from_level,
-)
+from mjlab.tasks.navigation_loco.mdp import OffsetGridPatternCfg
 from mjlab.tasks.navigation_loco.navigation_loco_env_cfg import (
   get_navigation_g1_robot_cfg,
+  make_low_level_actions,
   make_low_level_env_cfg,
   make_low_level_inference_observations,
 )
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg
+from mjlab.tasks.velocity.config.g1.env_cfgs import unitree_g1_flat_env_cfg
+from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 
 _TASK_IDS = {
   "Unitree-G1-29dof-LowLevel",
@@ -173,28 +160,6 @@ def test_height_scan_pattern_preserves_source_ray_origin_offset():
     assert scanner.max_distance == 100.0
 
 
-def test_global_curriculum_mutates_live_reward_cfg_without_setter():
-  lin_cfg = SimpleNamespace(params={"std": 1.0})
-  ang_cfg = SimpleNamespace(params={"std": 1.0})
-  reward_manager = SimpleNamespace(
-    get_term_cfg=lambda name: lin_cfg if name == "lin" else ang_cfg
-  )
-  env = SimpleNamespace(reward_manager=reward_manager)
-  _apply_tracking_std_from_level(
-    cast(Any, env),
-    level=5,
-    num_levels=5,
-    lin_var_initial=0.25,
-    lin_var_final=0.18,
-    ang_var_initial=0.35,
-    ang_var_final=0.15,
-    lin_term_name="lin",
-    ang_term_name="ang",
-  )
-  assert lin_cfg.params["std"] == round(0.18**0.5, 3)
-  assert ang_cfg.params["std"] == round(0.15**0.5, 3)
-
-
 def test_homework_todo_boundaries_are_all_preserved():
   task_root = Path(__file__).parents[1] / "src/mjlab/tasks"
   text = "\n".join(
@@ -207,13 +172,20 @@ def test_homework_todo_boundaries_are_all_preserved():
     assert text.count(f"HOMEWORK_TODO_{todo_id}_END") == 1
 
 
-def test_g1_sdk_order_and_locomotion_default_builtin_pd_controller():
+def test_g1_sdk_order_and_locomotion_default_builtin_position_controller():
   cfg = get_navigation_g1_robot_cfg()
   stock = get_stock_g1_robot_cfg()
+  assert list(make_low_level_actions()) == ["joint_pos"]
   assert not cfg.sort_actuators
   assert cfg.articulation is not None
   assert stock.articulation is not None
-  groups = [cast(BuiltinPdActuatorCfg, group) for group in cfg.articulation.actuators]
+  assert all(
+    isinstance(group, BuiltinPositionActuatorCfg)
+    for group in cfg.articulation.actuators
+  )
+  groups = [
+    cast(BuiltinPositionActuatorCfg, group) for group in cfg.articulation.actuators
+  ]
   stock_groups = [
     cast(BuiltinPositionActuatorCfg, group) for group in stock.articulation.actuators
   ]
@@ -221,26 +193,26 @@ def test_g1_sdk_order_and_locomotion_default_builtin_pd_controller():
   assert len(groups) == len(stock_groups) == 6
   for group, stock_group in zip(groups, stock_groups, strict=True):
     assert group.target_names_expr == stock_group.target_names_expr
+    assert group.transmission_type == stock_group.transmission_type
     assert group.stiffness == stock_group.stiffness
     assert group.damping == stock_group.damping
     assert group.effort_limit == stock_group.effort_limit
     assert group.armature == stock_group.armature
+    assert group.frictionloss == stock_group.frictionloss
+    assert group.viscous_damping == stock_group.viscous_damping
 
   entity = cfg.build()
   cursor = 0
   for actuator in entity.actuators:
-    assert isinstance(actuator, BuiltinPdActuator)
+    assert isinstance(actuator, BuiltinPositionActuator)
     num_targets = len(actuator.target_names)
     control_names = [
       control.name.split("/")[-1]
-      for control in entity.spec.actuators[cursor : cursor + 2 * num_targets]
+      for control in entity.spec.actuators[cursor : cursor + num_targets]
     ]
-    assert control_names == [
-      *(f"{name}_pd_pos" for name in actuator.target_names),
-      *(f"{name}_pd_vel" for name in actuator.target_names),
-    ]
-    cursor += 2 * num_targets
-  assert cursor == 58
+    assert control_names == list(actuator.target_names)
+    cursor += num_targets
+  assert cursor == 29
   joints = [
     joint.name for joint in entity.spec.joints if joint.name != "floating_base_joint"
   ]
@@ -255,71 +227,10 @@ def test_g1_sdk_order_and_locomotion_default_builtin_pd_controller():
   assert len(joints) == 29
 
 
-def test_restitution_mapping_matches_mujoco_warp_normal_drop():
-  targets = torch.tensor((0.0, 0.05, 0.1, 0.2, 0.3))
-  num_worlds = len(targets)
-  damping_ratios = restitution_to_damping_ratio(targets)
-  spec_xml = """
-    <mujoco>
-      <worldbody>
-        <geom name="floor" type="plane" size="2 2 0.1"/>
-        <body name="ball" pos="0 0 0.5">
-          <freejoint/>
-          <geom name="ball_geom" type="sphere" size="0.05" mass="1"
-                priority="1" friction="0.6 0.005 0.0001"/>
-        </body>
-      </worldbody>
-    </mujoco>
-  """
-  scene = Scene(
-    SceneCfg(
-      num_envs=num_worlds,
-      env_spacing=3.0,
-      entities={"ball": EntityCfg(spec_fn=lambda: mujoco.MjSpec.from_string(spec_xml))},
-    ),
-    device="cpu",
-  )
-  simulation = Simulation(
-    num_envs=num_worlds,
-    cfg=SimulationCfg(
-      nconmax=100,
-      njmax=100,
-      mujoco=MujocoCfg(timestep=0.005, iterations=10, ls_iterations=20),
-    ),
-    model=scene.compile(),
-    device="cpu",
-  )
-  scene.initialize(simulation.mj_model, simulation.model, simulation.data)
-  simulation.expand_model_fields(("geom_solref", "geom_solimp"))
-  ball_geom_id = simulation.mj_model.geom("ball/ball_geom").id
-  simulation.model.geom_solref[:, ball_geom_id, 0] = (
-    RandomizeContactMaterial.contact_time_constant
-  )
-  simulation.model.geom_solref[:, ball_geom_id, 1] = damping_ratios
-  simulation.model.geom_solimp[:, ball_geom_id] = torch.tensor(
-    RandomizeContactMaterial.contact_solimp
-  )
-
-  rising = torch.zeros(num_worlds, dtype=torch.bool)
-  reached_apex = torch.zeros_like(rising)
-  apex = torch.full((num_worlds,), 0.05)
-  for _ in range(300):
-    simulation.step()
-    height = simulation.data.qpos[:, 2]
-    vertical_velocity = simulation.data.qvel[:, 2]
-    active = ~reached_apex
-    rising |= active & (vertical_velocity > 0.0)
-    apex = torch.where(rising & active, torch.maximum(apex, height), apex)
-    reached_apex |= rising & (vertical_velocity <= 0.0)
-
-  measured = torch.sqrt(torch.clamp((apex - 0.05) / (0.5 - 0.05), min=0.0))
-  assert torch.isfinite(simulation.data.qpos).all()
-  assert torch.allclose(measured, targets, atol=0.02, rtol=0.0)
-
-
 @pytest.mark.filterwarnings("ignore:dr.body_mass only randomizes mass")
-def test_low_level_runtime_material_expansion_and_pd_routing():
+def test_low_level_runtime_native_foot_friction_and_position_routing():
   cfg = make_low_level_env_cfg(sequential=True)
+  assert list(cfg.actions) == ["joint_pos"]
   cfg.scene.num_envs = 2
   env = ManagerBasedRlEnv(cfg, device="cpu")
   try:
@@ -331,77 +242,114 @@ def test_low_level_runtime_material_expansion_and_pd_routing():
     assert torch.isfinite(reward).all()
 
     robot = env.scene["robot"]
-    geom_ids = robot.indexing.geom_ids
-    friction = env.sim.model.geom_friction[:, geom_ids, 0]
-    solref = env.sim.model.geom_solref[:, geom_ids]
-    solimp = env.sim.model.geom_solimp[:, geom_ids]
+    terrain = env.scene["terrain"]
+    foot_geom_ids = robot.indexing.geom_ids[
+      [i for i, name in enumerate(robot.geom_names) if "_foot" in name]
+    ]
+    friction = env.sim.model.geom_friction[:, foot_geom_ids, 0]
     assert env.sim.model.geom_friction.shape[0] == 2
-    assert env.sim.model.geom_solref.shape[0] == 2
-    assert env.sim.model.geom_solimp.shape[0] == 2
-    assert bool(((0.5 <= friction) & (friction <= 1.0)).all())
-    assert torch.all(solref[..., 0] == 0.02)
-    assert bool(((0.780635 <= solref[..., 1]) & (solref[..., 1] <= 1.0)).all())
-    expected_solimp = torch.tensor(RandomizeContactMaterial.contact_solimp)
-    assert torch.allclose(solimp, expected_solimp.expand_as(solimp))
+    assert bool(((0.3 <= friction) & (friction <= 1.2)).all())
+    assert all(torch.unique(friction[env_id]).numel() == 1 for env_id in range(2))
+
+    # Native G1 feet already outrank terrain, while solver parameters remain nominal.
+    assert torch.all(env.sim.model.geom_priority[foot_geom_ids] == 1)
+    assert torch.all(env.sim.model.geom_priority[terrain.indexing.geom_ids] == 0)
+    foot_solref = env.sim.model.geom_solref[:, foot_geom_ids]
+    foot_solimp = env.sim.model.geom_solimp[:, foot_geom_ids]
+    assert torch.allclose(
+      foot_solref,
+      torch.tensor((0.02, 1.0)).expand_as(foot_solref),
+    )
+    assert torch.allclose(
+      foot_solimp,
+      torch.tensor((0.9, 0.95, 0.001, 0.5, 2.0)).expand_as(foot_solimp),
+    )
+
+    command_term = env.command_manager.get_term("base_velocity")
+    assert command_term is not None
+    command_cfg = cast(UniformVelocityCommandCfg, command_term.cfg)
+    env_ids = torch.arange(env.num_envs, device=env.device)
+    env.common_step_counter = 3000 * 24
+    env.curriculum_manager.compute(env_ids)
+    assert command_cfg.ranges.lin_vel_x == (-1.5, 2.0)
+    assert command_cfg.ranges.ang_vel_z == (-0.7, 0.7)
+    env.common_step_counter = 6000 * 24
+    env.curriculum_manager.compute(env_ids)
+    assert command_cfg.ranges.lin_vel_x == (-2.0, 3.0)
 
     for actuator in robot.actuators:
-      assert isinstance(actuator, BuiltinPdActuator)
-      num_targets = len(actuator.target_names)
+      assert isinstance(actuator, BuiltinPositionActuator)
       controls = env.sim.data.ctrl[:, actuator.global_ctrl_ids]
       assert torch.allclose(
-        controls[:, :num_targets],
+        controls,
         robot.data.joint_pos_target[:, actuator.target_ids],
-      )
-      assert torch.allclose(
-        controls[:, num_targets:],
-        robot.data.joint_vel_target[:, actuator.target_ids],
       )
   finally:
     env.close()
 
 
-def test_low_level_base_sequential_and_play_variants():
+def test_low_level_material_command_curriculum_and_play_match_native_flat_g1():
+  native = unitree_g1_flat_env_cfg()
+  native_play = unitree_g1_flat_env_cfg(play=True)
   base = make_low_level_env_cfg(sequential=False)
   sequential = make_low_level_env_cfg(sequential=True)
   play = make_low_level_env_cfg(sequential=True, play=True)
-  base_command = cast(UniformLevelVelocityCommandCfg, base.commands["base_velocity"])
-  sequential_command = cast(
-    UniformLevelVelocityCommandCfg, sequential.commands["base_velocity"]
-  )
-  play_command = cast(UniformLevelVelocityCommandCfg, play.commands["base_velocity"])
-  assert base_command.adaptive_sampling
-  assert not sequential_command.adaptive_sampling
-  assert set(base.curriculum) == {"terrain_levels", "global_low_level_curriculum"}
-  assert set(sequential.curriculum) == {"sequential_low_level_curriculum"}
-  assert base.scene.terrain is not None
-  assert base.scene.terrain.terrain_generator is not None
-  assert sequential.scene.terrain is not None
-  assert sequential.scene.terrain.terrain_generator is not None
-  assert base.scene.terrain.terrain_generator.curriculum
-  assert not sequential.scene.terrain.terrain_generator.curriculum
-  assert base.scene.entities["robot"].collisions[0].priority == 1
-  assert sequential.scene.entities["robot"].collisions[0].priority == 1
-  base_material = base.events["physics_material"]
-  sequential_material = sequential.events["physics_material"]
-  assert base_material.func is RandomizeContactMaterial
-  assert sequential_material.func is RandomizeContactMaterial
-  assert base_material.params["friction_range"] == (0.3, 1.2)
-  assert base_material.params["restitution_range"] == (0.0, 0.3)
-  assert sequential_material.params["friction_range"] == (0.5, 1.0)
-  assert sequential_material.params["restitution_range"] == (0.0, 0.1)
-  assert base_material.params["num_buckets"] == 64
+
+  native_command = cast(UniformVelocityCommandCfg, native.commands["twist"])
+  for cfg in (base, sequential):
+    command = cast(UniformVelocityCommandCfg, cfg.commands["base_velocity"])
+    assert type(command) is UniformVelocityCommandCfg
+    assert command.resampling_time_range == native_command.resampling_time_range
+    assert command.rel_standing_envs == native_command.rel_standing_envs
+    assert command.rel_heading_envs == native_command.rel_heading_envs
+    assert command.rel_forward_envs == native_command.rel_forward_envs
+    assert command.heading_command == native_command.heading_command
+    assert command.heading_control_stiffness == native_command.heading_control_stiffness
+    assert command.ranges == native_command.ranges
+
+    assert set(cfg.curriculum) == set(native.curriculum) == {"command_vel"}
+    assert cfg.curriculum["command_vel"].func is native.curriculum["command_vel"].func
+    velocity_stages = cfg.curriculum["command_vel"].params["velocity_stages"]
+    native_stages = native.curriculum["command_vel"].params["velocity_stages"]
+    assert [stage["step"] for stage in velocity_stages] == [0, 3000 * 24, 6000 * 24]
+    assert [
+      {key: value for key, value in stage.items() if key != "step"}
+      for stage in velocity_stages
+    ] == [
+      {key: value for key, value in stage.items() if key != "step"}
+      for stage in native_stages
+    ]
+
+    material = cfg.events["foot_friction"]
+    native_material = native.events["foot_friction"]
+    assert material.func is native_material.func
+    assert material.mode == native_material.mode == "startup"
+    assert material.params["operation"] == native_material.params["operation"]
+    assert material.params["ranges"] == native_material.params["ranges"]
+    assert material.params["shared_random"] is True
+    assert (
+      material.params["asset_cfg"].geom_names
+      == native_material.params["asset_cfg"].geom_names
+    )
+    assert "physics_material" not in cfg.events
+
+    assert cfg.scene.terrain is not None
+    assert cfg.scene.terrain.terrain_generator is not None
+    assert not cfg.scene.terrain.terrain_generator.curriculum
+
   assert base.events["add_base_mass"].params["ranges"] == (-1.0, 3.0)
   assert sequential.events["add_base_mass"].params["ranges"] == (-0.5, 1.0)
   assert base.events["push_robot"].params["velocity_range"]["x"] == (-0.3, 0.3)
-  # Source sequential play starts with adaptive sampling disabled; the forced
-  # max curriculum level enables phase 2 during the first reset.
-  assert not play_command.adaptive_sampling
+
+  play_command = cast(UniformVelocityCommandCfg, play.commands["base_velocity"])
+  native_play_command = cast(UniformVelocityCommandCfg, native_play.commands["twist"])
+  assert play_command.ranges == native_play_command.ranges
+  assert play.curriculum == native_play.curriculum == {}
   assert play.scene.terrain is not None
   assert play.scene.terrain.terrain_generator is not None
   assert play.scene.terrain.terrain_generator.num_rows == 2
   assert play.scene.terrain.terrain_generator.num_cols == 10
-  assert set(play.curriculum) == {"sequential_low_level_curriculum"}
-  assert play.curriculum["sequential_low_level_curriculum"].params["forced_level"] == 5
+  assert not play.scene.terrain.terrain_generator.curriculum
 
 
 def test_fixed_map_reset_event_precedes_robot_reset():

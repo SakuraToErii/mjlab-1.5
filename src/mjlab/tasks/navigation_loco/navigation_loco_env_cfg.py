@@ -6,7 +6,6 @@ import math
 from copy import deepcopy
 from typing import cast
 
-from mjlab.actuator import BuiltinPdActuatorCfg, BuiltinPositionActuatorCfg
 from mjlab.asset_zoo.robots import get_g1_robot_cfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.envs import ManagerBasedRlEnvCfg
@@ -29,6 +28,7 @@ from mjlab.sensor import (
   RayCastSensorCfg,
 )
 from mjlab.sim import MujocoCfg, SimulationCfg
+from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.terrains import TerrainEntityCfg, TerrainGeneratorCfg
 from mjlab.terrains.config import flat, random_rough
 from mjlab.utils.noise import UniformNoiseCfg
@@ -36,11 +36,13 @@ from mjlab.viewer import ViewerConfig
 
 from . import mdp
 
-NUM_LEVELS = 5
+_G1_FOOT_GEOM_NAMES = tuple(
+  f"{side}_foot{i}_collision" for side in ("left", "right") for i in range(1, 8)
+)
 
 
 def get_navigation_g1_robot_cfg() -> EntityCfg:
-  """G1 with the source policy pose/ABI and mjlab locomotion PD parameters."""
+  """G1 with the source policy pose/ABI and mjlab's native position actuators."""
   cfg = get_g1_robot_cfg()
   cfg.init_state = EntityCfg.InitialStateCfg(
     pos=(0.0, 0.0, 0.8),
@@ -57,33 +59,14 @@ def get_navigation_g1_robot_cfg() -> EntityCfg:
     },
     joint_vel={".*": 0.0},
   )
-  # Use the same motor-derived gains, effort caps, reflected inertias and joint
-  # grouping as mjlab's G1 locomotion task, but express the controller as native
-  # paired position/velocity PD elements. The source velocity_limit_sim has no
-  # BuiltinPd equivalent and is intentionally omitted for low-level retraining.
+  # Keep the stock G1 BuiltinPosition actuator groups, including their motor-derived
+  # gains, effort caps, reflected inertias and declaration order. Only the source
+  # task's soft joint-position limit factor differs from mjlab's stock robot config.
   native_articulation = cast(EntityArticulationInfoCfg, cfg.articulation)
-  native_actuators = cast(
-    tuple[BuiltinPositionActuatorCfg, ...], native_articulation.actuators
-  )
   cfg.articulation = EntityArticulationInfoCfg(
+    actuators=native_articulation.actuators,
     soft_joint_pos_limit_factor=1.0,
-    actuators=tuple(
-      BuiltinPdActuatorCfg(
-        target_names_expr=actuator.target_names_expr,
-        transmission_type=actuator.transmission_type,
-        stiffness=actuator.stiffness,
-        damping=actuator.damping,
-        effort_limit=actuator.effort_limit,
-        armature=actuator.armature,
-        frictionloss=actuator.frictionloss,
-        viscous_damping=actuator.viscous_damping,
-      )
-      for actuator in native_actuators
-    ),
   )
-  # BuiltinPd emits [position targets..., velocity targets...] per actuator group.
-  # Keep group declaration order so each paired control block remains contiguous;
-  # policy actions are still resolved by the robot's 29-DoF joint-definition order.
   cfg.sort_actuators = False
   return cfg
 
@@ -163,56 +146,45 @@ def make_low_level_inference_observations() -> ObservationGroupCfg:
 
 def make_low_level_actions() -> dict[str, ActionTermCfg]:
   return {
-    "JointPositionAction": JointPositionActionCfg(
+    "joint_pos": JointPositionActionCfg(
       entity_name="robot", actuator_names=(".*",), scale=0.25, use_default_offset=True
     )
   }
 
 
-def make_low_level_commands(
-  *, adaptive_sampling: bool = False
-) -> dict[str, CommandTermCfg]:
+def make_low_level_commands() -> dict[str, CommandTermCfg]:
   return {
-    "base_velocity": mdp.UniformLevelVelocityCommandCfg(
+    "base_velocity": UniformVelocityCommandCfg(
       entity_name="robot",
-      resampling_time_range=(10.0, 10.0),
-      rel_standing_envs=0.08,
-      rel_heading_envs=1.0,
-      heading_command=False,
+      resampling_time_range=(3.0, 8.0),
+      rel_standing_envs=0.1,
+      rel_heading_envs=0.3,
+      rel_forward_envs=0.2,
+      heading_command=True,
+      heading_control_stiffness=0.5,
       debug_vis=True,
-      ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-        lin_vel_x=(-0.1, 0.1), lin_vel_y=(-0.1, 0.1), ang_vel_z=(-0.1, 0.1)
+      ranges=UniformVelocityCommandCfg.Ranges(
+        lin_vel_x=(-1.0, 1.0),
+        lin_vel_y=(-1.0, 1.0),
+        ang_vel_z=(-0.5, 0.5),
+        heading=(-math.pi, math.pi),
       ),
-      limit_ranges=mdp.UniformLevelVelocityCommandCfg.Ranges(
-        lin_vel_x=(-0.5, 1.0), lin_vel_y=(-0.5, 0.5), ang_vel_z=(-0.5, 0.5)
-      ),
-      adaptive_sampling=adaptive_sampling,
-      num_bins={"lin_vel_x": 15, "lin_vel_y": 10, "ang_vel_z": 10},
-      ema_alpha=0.1,
-      min_bin_probability=0.02,
-      sampling_temperature=1.0,
-      warmup_resamples=2,
     )
   }
 
 
 def make_low_level_events(*, sequential: bool = True) -> dict[str, EventTermCfg]:
-  friction_range = (0.5, 1.0) if sequential else (0.3, 1.2)
-  restitution_range = (0.0, 0.1) if sequential else (0.0, 0.3)
   mass_range = (-0.5, 1.0) if sequential else (-1.0, 3.0)
   push = 0.15 if sequential else 0.3
   return {
-    # The source samples 64 material buckets once and assigns one bucket to each
-    # environment/shape. MuJoCo has one sliding-friction coefficient, so use the
-    # source dynamic-friction range and map restitution to calibrated contact damping.
-    "physics_material": EventTermCfg(
-      func=mdp.RandomizeContactMaterial,
+    "foot_friction": EventTermCfg(
+      func=dr.geom_friction,
       mode="startup",
       params={
-        "asset_cfg": SceneEntityCfg("robot", geom_names=(".*_collision",)),
-        "friction_range": friction_range,
-        "restitution_range": restitution_range,
-        "num_buckets": 64,
+        "asset_cfg": SceneEntityCfg("robot", geom_names=_G1_FOOT_GEOM_NAMES),
+        "operation": "abs",
+        "ranges": (0.3, 1.2),
+        "shared_random": True,
       },
     ),
     "add_base_mass": EventTermCfg(
@@ -380,37 +352,19 @@ def make_low_level_terminations() -> dict[str, TerminationTermCfg]:
   }
 
 
-def make_low_level_curriculum(
-  *, sequential: bool = True
-) -> dict[str, CurriculumTermCfg]:
-  if sequential:
-    return {
-      "sequential_low_level_curriculum": CurriculumTermCfg(
-        func=mdp.sequential_low_level_curriculum,
-        params={
-          "command_name": "base_velocity",
-          "num_levels": NUM_LEVELS,
-          "lin_promotion_threshold": 0.75,
-          "ang_promotion_threshold": 0.5,
-        },
-      )
-    }
+def make_low_level_curriculum() -> dict[str, CurriculumTermCfg]:
   return {
-    "terrain_levels": CurriculumTermCfg(
-      func=mdp.terrain_levels_vel, params={"command_name": "base_velocity"}
-    ),
-    "global_low_level_curriculum": CurriculumTermCfg(
-      func=mdp.global_low_level_curriculum,
+    "command_vel": CurriculumTermCfg(
+      func=mdp.commands_vel,
       params={
         "command_name": "base_velocity",
-        "num_levels": NUM_LEVELS,
-        "promotion_ratio": 0.70,
-        "lin_var_initial": 0.25,
-        "lin_var_final": 0.18,
-        "ang_var_initial": 0.35,
-        "ang_var_final": 0.15,
+        "velocity_stages": [
+          {"step": 0, "lin_vel_x": (-1.0, 1.0), "ang_vel_z": (-0.5, 0.5)},
+          {"step": 3000 * 24, "lin_vel_x": (-1.5, 2.0), "ang_vel_z": (-0.7, 0.7)},
+          {"step": 6000 * 24, "lin_vel_x": (-2.0, 3.0)},
+        ],
       },
-    ),
+    )
   }
 
 
@@ -422,7 +376,7 @@ def make_low_level_env_cfg(
     border_width=20.0,
     num_rows=9,
     num_cols=21,
-    curriculum=not sequential,
+    curriculum=False,
     sub_terrains={
       "flat": flat(proportion=0.6),
       "random_rough": random_rough(
@@ -465,13 +419,6 @@ def make_low_level_env_cfg(
     history_length=4,
   )
   robot_cfg = get_navigation_g1_robot_cfg()
-  # The source terrain uses friction=1 with multiply combination, so the sampled
-  # robot coefficient is the effective contact coefficient. MuJoCo combines
-  # equal-priority friction with max(); giving robot collision geoms higher
-  # priority makes the task's randomized sliding coefficient win instead.
-  collision_cfg = deepcopy(robot_cfg.collisions[0])
-  collision_cfg.priority = 1
-  robot_cfg.collisions = (collision_cfg,)
   cfg = ManagerBasedRlEnvCfg(
     scene=SceneCfg(
       terrain=TerrainEntityCfg(
@@ -484,11 +431,11 @@ def make_low_level_env_cfg(
     ),
     observations=make_low_level_observations(),
     actions=make_low_level_actions(),
-    commands=make_low_level_commands(adaptive_sampling=not sequential),
+    commands=make_low_level_commands(),
     events=make_low_level_events(sequential=sequential),
     rewards=make_low_level_rewards(sequential=sequential),
     terminations=make_low_level_terminations(),
-    curriculum=make_low_level_curriculum(sequential=sequential),
+    curriculum=make_low_level_curriculum(),
     viewer=ViewerConfig(
       origin_type=ViewerConfig.OriginType.ASSET_BODY,
       entity_name="robot",
@@ -505,21 +452,18 @@ def make_low_level_env_cfg(
     episode_length_s=20.0,
   )
   if play:
-    # Keep mjlab's registered-play safety convention (infinite deterministic rollout,
-    # no external pushes) while preserving the source command/curriculum state.
+    # Apply the repository's play contract and the native flat-G1 command range.
     cfg.scene.num_envs = 32
     cfg.episode_length_s = 1e9
     cfg.observations["actor"].enable_corruption = False
     cfg.events.pop("push_robot", None)
     terrain.num_rows = 2
     terrain.num_cols = 10
-    terrain.curriculum = not sequential
+    terrain.curriculum = False
+    cfg.curriculum = {}
     base_velocity_command = cast(
-      mdp.UniformLevelVelocityCommandCfg, cfg.commands["base_velocity"]
+      UniformVelocityCommandCfg, cfg.commands["base_velocity"]
     )
-    base_velocity_command.ranges = deepcopy(base_velocity_command.limit_ranges)
-    curriculum_name = (
-      "sequential_low_level_curriculum" if sequential else "global_low_level_curriculum"
-    )
-    cfg.curriculum[curriculum_name].params["forced_level"] = NUM_LEVELS
+    base_velocity_command.ranges.lin_vel_x = (-1.5, 2.0)
+    base_velocity_command.ranges.ang_vel_z = (-0.7, 0.7)
   return cfg

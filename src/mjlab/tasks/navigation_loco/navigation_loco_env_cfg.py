@@ -6,7 +6,7 @@ import math
 from copy import deepcopy
 from typing import cast
 
-from mjlab.asset_zoo.robots import get_g1_robot_cfg
+from mjlab.asset_zoo.robots import G1_ACTION_SCALE, get_g1_robot_cfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
@@ -25,9 +25,11 @@ from mjlab.sensor import (
   ContactMatch,
   ContactSensorCfg,
   ObjRef,
-  RayCastSensorCfg,
+  RingPatternCfg,
+  TerrainHeightSensorCfg,
 )
 from mjlab.sim import MujocoCfg, SimulationCfg
+from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.terrains import TerrainEntityCfg, TerrainGeneratorCfg
 from mjlab.terrains.config import flat, random_rough
@@ -42,26 +44,11 @@ _G1_FOOT_GEOM_NAMES = tuple(
 
 
 def get_navigation_g1_robot_cfg() -> EntityCfg:
-  """G1 with the source policy pose/ABI and mjlab's native position actuators."""
+  """G1 with the native flat-velocity default pose and position actuators."""
   cfg = get_g1_robot_cfg()
-  cfg.init_state = EntityCfg.InitialStateCfg(
-    pos=(0.0, 0.0, 0.8),
-    joint_pos={
-      ".*_hip_pitch_joint": -0.1,
-      ".*_knee_joint": 0.3,
-      ".*_ankle_pitch_joint": -0.2,
-      ".*_shoulder_pitch_joint": 0.3,
-      "left_shoulder_roll_joint": 0.25,
-      "right_shoulder_roll_joint": -0.25,
-      ".*_elbow_joint": 0.97,
-      "left_wrist_roll_joint": 0.15,
-      "right_wrist_roll_joint": -0.15,
-    },
-    joint_vel={".*": 0.0},
-  )
-  # Keep the stock G1 BuiltinPosition actuator groups, including their motor-derived
-  # gains, effort caps, reflected inertias and declaration order. Only the source
-  # task's soft joint-position limit factor differs from mjlab's stock robot config.
+  # Keep the stock G1 knees-bent initial pose and BuiltinPosition actuator groups,
+  # including their motor-derived gains, effort caps, reflected inertias and order.
+  # Only the migrated task's soft joint-position limit factor remains task-specific.
   native_articulation = cast(EntityArticulationInfoCfg, cfg.articulation)
   cfg.articulation = EntityArticulationInfoCfg(
     actuators=native_articulation.actuators,
@@ -147,7 +134,10 @@ def make_low_level_inference_observations() -> ObservationGroupCfg:
 def make_low_level_actions() -> dict[str, ActionTermCfg]:
   return {
     "joint_pos": JointPositionActionCfg(
-      entity_name="robot", actuator_names=(".*",), scale=0.25, use_default_offset=True
+      entity_name="robot",
+      actuator_names=(".*",),
+      scale=G1_ACTION_SCALE,
+      use_default_offset=True,
     )
   }
 
@@ -175,7 +165,6 @@ def make_low_level_commands() -> dict[str, CommandTermCfg]:
 
 def make_low_level_events(*, sequential: bool = True) -> dict[str, EventTermCfg]:
   mass_range = (-0.5, 1.0) if sequential else (-1.0, 3.0)
-  push = 0.15 if sequential else 0.3
   return {
     "foot_friction": EventTermCfg(
       func=dr.geom_friction,
@@ -213,20 +202,16 @@ def make_low_level_events(*, sequential: bool = True) -> dict[str, EventTermCfg]
         "com_range": {"x": (-0.025, 0.025), "y": (-0.025, 0.025), "z": (-0.025, 0.025)},
       },
     ),
-    "base_external_force_torque": EventTermCfg(
-      func=envs_mdp.apply_external_force_torque,
-      mode="reset",
-      params={
-        "asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",)),
-        "force_range": (0.0, 0.0),
-        "torque_range": (0.0, 0.0),
-      },
-    ),
     "reset_base": EventTermCfg(
       func=envs_mdp.reset_root_state_uniform,
       mode="reset",
       params={
-        "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)},
+        "pose_range": {
+          "x": (-0.5, 0.5),
+          "y": (-0.5, 0.5),
+          "z": (0.01, 0.05),
+          "yaw": (-3.14, 3.14),
+        },
         "velocity_range": {},
       },
     ),
@@ -235,107 +220,161 @@ def make_low_level_events(*, sequential: bool = True) -> dict[str, EventTermCfg]
       mode="reset",
       params={
         "position_range": (0.0, 0.0),
-        "velocity_range": (-1.0, 1.0),
+        "velocity_range": (0.0, 0.0),
         "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
       },
     ),
     "push_robot": EventTermCfg(
       func=envs_mdp.push_by_setting_velocity,
       mode="interval",
-      interval_range_s=(3.0, 7.0),
-      params={"velocity_range": {"x": (-push, push), "y": (-push, push)}},
+      interval_range_s=(1.0, 3.0),
+      params={
+        "velocity_range": {
+          "x": (-0.5, 0.5),
+          "y": (-0.5, 0.5),
+          "z": (-0.4, 0.4),
+          "roll": (-0.52, 0.52),
+          "pitch": (-0.52, 0.52),
+          "yaw": (-0.78, 0.78),
+        }
+      },
     ),
   }
 
 
-def make_low_level_rewards(*, sequential: bool = True) -> dict[str, RewardTermCfg]:
-  feet = SceneEntityCfg(
-    "robot", body_names=("left_ankle_roll_link", "right_ankle_roll_link")
-  )
+def make_low_level_rewards() -> dict[str, RewardTermCfg]:
+  """Match the native G1 flat velocity rewards, without height-command tracking."""
+  site_names = ("left_foot", "right_foot")
   return {
-    "track_lin_vel_xy": RewardTermCfg(
-      func=mdp.track_linear_velocity,
-      weight=1.0,
-      params={
-        "command_name": "base_velocity",
-        "std": math.sqrt(0.20 if sequential else 0.25),
-      },
-    ),
-    "track_ang_vel_z": RewardTermCfg(
-      func=mdp.track_angular_velocity,
-      weight=1.0,
+    "track_linear_velocity": RewardTermCfg(
+      func=velocity_mdp.track_linear_velocity,
+      weight=2.0,
       params={"command_name": "base_velocity", "std": math.sqrt(0.25)},
     ),
-    "alive": RewardTermCfg(func=envs_mdp.is_alive, weight=0.10),
-    "base_linear_velocity": RewardTermCfg(func=mdp.lin_vel_z_l2, weight=-2.0),
-    "base_angular_velocity": RewardTermCfg(func=mdp.ang_vel_xy_l2, weight=-0.05),
-    "joint_vel": RewardTermCfg(func=envs_mdp.joint_vel_l2, weight=-0.001),
-    "joint_acc": RewardTermCfg(func=envs_mdp.joint_acc_l2, weight=-2.5e-7),
-    "action_rate": RewardTermCfg(func=envs_mdp.action_rate_l2, weight=-0.05),
-    "dof_pos_limits": RewardTermCfg(func=envs_mdp.joint_pos_limits, weight=-5.0),
-    "energy": RewardTermCfg(func=mdp.energy, weight=-2e-5),
-    "stand_still": RewardTermCfg(
-      func=mdp.stand_still, weight=-0.1, params={"command_name": "base_velocity"}
+    "track_angular_velocity": RewardTermCfg(
+      func=velocity_mdp.track_angular_velocity,
+      weight=2.0,
+      params={"command_name": "base_velocity", "std": math.sqrt(0.5)},
     ),
-    "joint_deviation_arms": RewardTermCfg(
-      func=mdp.joint_deviation_l1,
+    "upright": RewardTermCfg(
+      func=velocity_mdp.upright,
+      weight=1.0,
+      params={
+        "std": math.sqrt(0.2),
+        "asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",)),
+      },
+    ),
+    "pose": RewardTermCfg(
+      func=velocity_mdp.variable_posture,
+      weight=1.0,
+      params={
+        "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
+        "command_name": "base_velocity",
+        "std_standing": {".*": 0.05},
+        "std_walking": {
+          r".*hip_pitch.*": 0.3,
+          r".*hip_roll.*": 0.15,
+          r".*hip_yaw.*": 0.15,
+          r".*knee.*": 0.35,
+          r".*ankle_pitch.*": 0.25,
+          r".*ankle_roll.*": 0.1,
+          r".*waist_yaw.*": 0.2,
+          r".*waist_roll.*": 0.08,
+          r".*waist_pitch.*": 0.1,
+          r".*shoulder_pitch.*": 0.15,
+          r".*shoulder_roll.*": 0.15,
+          r".*shoulder_yaw.*": 0.1,
+          r".*elbow.*": 0.15,
+          r".*wrist.*": 0.3,
+        },
+        "std_running": {
+          r".*hip_pitch.*": 0.5,
+          r".*hip_roll.*": 0.2,
+          r".*hip_yaw.*": 0.2,
+          r".*knee.*": 0.6,
+          r".*ankle_pitch.*": 0.35,
+          r".*ankle_roll.*": 0.15,
+          r".*waist_yaw.*": 0.3,
+          r".*waist_roll.*": 0.08,
+          r".*waist_pitch.*": 0.2,
+          r".*shoulder_pitch.*": 0.5,
+          r".*shoulder_roll.*": 0.2,
+          r".*shoulder_yaw.*": 0.15,
+          r".*elbow.*": 0.35,
+          r".*wrist.*": 0.3,
+        },
+        "walking_threshold": 0.05,
+        "running_threshold": 1.5,
+      },
+    ),
+    "body_ang_vel": RewardTermCfg(
+      func=velocity_mdp.body_angular_velocity_penalty,
+      weight=-0.05,
+      params={"asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",))},
+    ),
+    "angular_momentum": RewardTermCfg(
+      func=velocity_mdp.angular_momentum_penalty,
+      weight=-0.02,
+      params={"sensor_name": "robot/root_angmom"},
+    ),
+    "dof_pos_limits": RewardTermCfg(func=velocity_mdp.joint_pos_limits, weight=-1.0),
+    "action_rate_l2": RewardTermCfg(func=velocity_mdp.action_rate_l2, weight=-0.1),
+    "air_time": RewardTermCfg(
+      func=velocity_mdp.feet_air_time,
+      weight=0.0,
+      params={
+        "sensor_name": "feet_ground_contact",
+        "threshold_min": 0.05,
+        "threshold_max": 0.5,
+        "command_name": "base_velocity",
+        "command_threshold": 0.5,
+      },
+    ),
+    "foot_clearance": RewardTermCfg(
+      func=velocity_mdp.feet_clearance,
+      weight=-2.0,
+      params={
+        "target_height": 0.1,
+        "height_sensor_name": "foot_height_scan",
+        "command_name": "base_velocity",
+        "command_threshold": 0.05,
+        "asset_cfg": SceneEntityCfg("robot", site_names=site_names),
+      },
+    ),
+    "foot_swing_height": RewardTermCfg(
+      func=velocity_mdp.feet_swing_height,
+      weight=-0.25,
+      params={
+        "sensor_name": "feet_ground_contact",
+        "height_sensor_name": "foot_height_scan",
+        "target_height": 0.1,
+        "command_name": "base_velocity",
+        "command_threshold": 0.05,
+      },
+    ),
+    "foot_slip": RewardTermCfg(
+      func=velocity_mdp.feet_slip,
       weight=-0.1,
       params={
-        "asset_cfg": SceneEntityCfg(
-          "robot", joint_names=(".*_shoulder_.*_joint", ".*_elbow_joint", ".*_wrist_.*")
-        )
-      },
-    ),
-    "joint_deviation_waists": RewardTermCfg(
-      func=mdp.joint_deviation_l1,
-      weight=-1.0,
-      params={"asset_cfg": SceneEntityCfg("robot", joint_names=("waist.*",))},
-    ),
-    "joint_deviation_legs": RewardTermCfg(
-      func=mdp.joint_deviation_l1,
-      weight=-1.0,
-      params={
-        "asset_cfg": SceneEntityCfg(
-          "robot", joint_names=(".*_hip_roll_joint", ".*_hip_yaw_joint")
-        )
-      },
-    ),
-    "flat_orientation_l2": RewardTermCfg(
-      func=envs_mdp.flat_orientation_l2, weight=-5.0
-    ),
-    "base_height": RewardTermCfg(
-      func=mdp.base_height_l2, weight=-10.0, params={"target_height": 0.78}
-    ),
-    "gait": RewardTermCfg(
-      func=mdp.feet_gait,
-      weight=0.5,
-      params={
-        "period": 0.8,
-        "offset": [0.0, 0.5],
-        "threshold": 0.55,
-        "command_name": "base_velocity",
         "sensor_name": "feet_ground_contact",
+        "command_name": "base_velocity",
+        "command_threshold": 0.05,
+        "asset_cfg": SceneEntityCfg("robot", site_names=site_names),
       },
     ),
-    "feet_slide": RewardTermCfg(
-      func=mdp.feet_slide,
-      weight=-0.2,
-      params={"asset_cfg": feet, "sensor_name": "feet_ground_contact"},
+    "soft_landing": RewardTermCfg(
+      func=velocity_mdp.soft_landing,
+      weight=-1e-5,
+      params={
+        "sensor_name": "feet_ground_contact",
+        "command_name": "base_velocity",
+        "command_threshold": 0.05,
+      },
     ),
-    "feet_clearance": RewardTermCfg(
-      func=mdp.foot_clearance_reward,
-      weight=1.0,
-      params={"std": 0.05, "tanh_mult": 2.0, "target_height": 0.1, "asset_cfg": feet},
-    ),
-    "feet_contact_without_cmd": RewardTermCfg(
-      func=mdp.feet_contact_without_cmd,
-      weight=0.05,
-      params={"sensor_name": "feet_ground_contact", "command_name": "base_velocity"},
-    ),
-    "undesired_contacts": RewardTermCfg(
-      func=mdp.undesired_contacts,
+    "self_collisions": RewardTermCfg(
+      func=velocity_mdp.self_collision_cost,
       weight=-1.0,
-      params={"threshold": 1.0, "sensor_name": "undesired_contacts"},
+      params={"sensor_name": "self_collision", "force_threshold": 10.0},
     ),
   }
 
@@ -343,11 +382,9 @@ def make_low_level_rewards(*, sequential: bool = True) -> dict[str, RewardTermCf
 def make_low_level_terminations() -> dict[str, TerminationTermCfg]:
   return {
     "time_out": TerminationTermCfg(func=envs_mdp.time_out, time_out=True),
-    "base_height": TerminationTermCfg(
-      func=envs_mdp.root_height_below_minimum, params={"minimum_height": 0.2}
-    ),
-    "bad_orientation": TerminationTermCfg(
-      func=envs_mdp.bad_orientation, params={"limit_angle": 0.8}
+    "fell_over": TerminationTermCfg(
+      func=envs_mdp.bad_orientation,
+      params={"limit_angle": math.radians(70.0)},
     ),
   }
 
@@ -355,13 +392,13 @@ def make_low_level_terminations() -> dict[str, TerminationTermCfg]:
 def make_low_level_curriculum() -> dict[str, CurriculumTermCfg]:
   return {
     "command_vel": CurriculumTermCfg(
-      func=mdp.commands_vel,
+      func=velocity_mdp.commands_vel,
       params={
         "command_name": "base_velocity",
         "velocity_stages": [
-          {"step": 0, "lin_vel_x": (-1.0, 1.0), "ang_vel_z": (-0.5, 0.5)},
-          {"step": 3000 * 24, "lin_vel_x": (-1.5, 2.0), "ang_vel_z": (-0.7, 0.7)},
-          {"step": 6000 * 24, "lin_vel_x": (-2.0, 3.0)},
+          {"step": 0, "lin_vel_x": (-1.0, 1.0), "ang_vel_z": (-0.3, 0.3)},
+          {"step": 3000 * 24, "lin_vel_x": (-1.5, 2.0), "ang_vel_z": (-0.5, 0.5)},
+          {"step": 6000 * 24, "lin_vel_x": (-2.0, 3.0), "ang_vel_z": (-0.7, 0.7)},
         ],
       },
     )
@@ -384,23 +421,29 @@ def make_low_level_env_cfg(
       ),
     },
   )
-  scan = RayCastSensorCfg(
-    name="height_scanner",
-    frame=ObjRef(type="body", name="torso_link", entity="robot"),
-    ray_alignment="yaw",
-    pattern=mdp.OffsetGridPatternCfg(
-      size=(1.6, 1.0), resolution=0.1, origin_offset=(0.0, 0.0, 20.0)
+  foot_height_scan = TerrainHeightSensorCfg(
+    name="foot_height_scan",
+    frame=tuple(
+      ObjRef(type="site", name=site_name, entity="robot")
+      for site_name in ("left_foot", "right_foot")
     ),
-    max_distance=100.0,
+    ray_alignment="yaw",
+    pattern=RingPatternCfg.single_ring(radius=0.03, num_samples=6),
+    max_distance=1.0,
     exclude_parent_body=True,
     include_geom_groups=(0,),
-    debug_vis=False,
+    debug_vis=True,
+    viz=TerrainHeightSensorCfg.VizCfg(
+      show_rays=True,
+      hit_color=(1.0, 0.0, 1.0, 0.8),
+      hit_sphere_color=(1.0, 0.0, 1.0, 1.0),
+    ),
   )
   feet_sensor = ContactSensorCfg(
     name="feet_ground_contact",
     primary=ContactMatch(
-      mode="body",
-      pattern=("left_ankle_roll_link", "right_ankle_roll_link"),
+      mode="subtree",
+      pattern=r"^(left_ankle_roll_link|right_ankle_roll_link)$",
       entity="robot",
     ),
     secondary=ContactMatch(mode="body", pattern="terrain"),
@@ -409,12 +452,12 @@ def make_low_level_env_cfg(
     num_slots=1,
     track_air_time=True,
   )
-  undesired_sensor = ContactSensorCfg(
-    name="undesired_contacts",
-    primary=ContactMatch(mode="body", pattern=r"^(?!.*ankle.*).*$", entity="robot"),
-    secondary=ContactMatch(mode="body", pattern="terrain"),
+  self_collision_sensor = ContactSensorCfg(
+    name="self_collision",
+    primary=ContactMatch(mode="subtree", pattern="pelvis", entity="robot"),
+    secondary=ContactMatch(mode="subtree", pattern="pelvis", entity="robot"),
     fields=("found", "force"),
-    reduce="maxforce",
+    reduce="none",
     num_slots=1,
     history_length=4,
   )
@@ -425,7 +468,7 @@ def make_low_level_env_cfg(
         terrain_type="generator", terrain_generator=terrain, max_init_terrain_level=3
       ),
       entities={"robot": robot_cfg},
-      sensors=(scan, feet_sensor, undesired_sensor),
+      sensors=(foot_height_scan, feet_sensor, self_collision_sensor),
       num_envs=4096,
       env_spacing=2.5,
     ),
@@ -433,7 +476,7 @@ def make_low_level_env_cfg(
     actions=make_low_level_actions(),
     commands=make_low_level_commands(),
     events=make_low_level_events(sequential=sequential),
-    rewards=make_low_level_rewards(sequential=sequential),
+    rewards=make_low_level_rewards(),
     terminations=make_low_level_terminations(),
     curriculum=make_low_level_curriculum(),
     viewer=ViewerConfig(
@@ -464,6 +507,6 @@ def make_low_level_env_cfg(
     base_velocity_command = cast(
       UniformVelocityCommandCfg, cfg.commands["base_velocity"]
     )
-    base_velocity_command.ranges.lin_vel_x = (-1.5, 2.0)
+    base_velocity_command.ranges.lin_vel_x = (-2.0, 3.0)
     base_velocity_command.ranges.ang_vel_z = (-0.7, 0.7)
   return cfg

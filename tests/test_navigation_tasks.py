@@ -7,8 +7,11 @@ import pytest
 import torch
 
 from mjlab.actuator import BuiltinPositionActuator, BuiltinPositionActuatorCfg
+from mjlab.asset_zoo.robots import G1_ACTION_SCALE
 from mjlab.asset_zoo.robots import get_g1_robot_cfg as get_stock_g1_robot_cfg
 from mjlab.envs import ManagerBasedRlEnv
+from mjlab.envs.mdp.actions import JointPositionActionCfg
+from mjlab.sensor import RingPatternCfg, TerrainHeightSensorCfg
 from mjlab.tasks.navigation.config.g1.rl_cfg import navigation_ppo_runner_cfg
 from mjlab.tasks.navigation.mdp import (
   ArenaPose2dCommandCfg,
@@ -34,7 +37,10 @@ from mjlab.tasks.navigation.mdp.obstacles.mixed_obstacle_layout import (
   MixedObstacleLayoutCfg,
   _build_slot_metadata,
 )
-from mjlab.tasks.navigation.mdp.pre_trained_policy_action import PreTrainedPolicyAction
+from mjlab.tasks.navigation.mdp.pre_trained_policy_action import (
+  PreTrainedPolicyAction,
+  PreTrainedPolicyActionCfg,
+)
 from mjlab.tasks.navigation.navigation_env_cfg import (
   make_navigation_env_cfg,
   make_navigation_v2_env_cfg,
@@ -148,16 +154,26 @@ def test_height_scan_pattern_preserves_source_ray_origin_offset():
   offsets, directions = pattern.generate_rays(None, "cpu")
   assert torch.all(offsets[:, 2] == 20.0)
   assert torch.all(directions[:, 2] == -1.0)
-  for cfg in (
-    make_low_level_env_cfg(),
-    make_navigation_v5_mixed_obstacle_env_cfg(),
-  ):
-    scanner = next(
-      sensor for sensor in cfg.scene.sensors if sensor.name == "height_scanner"
-    )
-    assert isinstance(scanner.pattern, OffsetGridPatternCfg)
-    assert scanner.pattern.origin_offset == (0.0, 0.0, 20.0)
-    assert scanner.max_distance == 100.0
+  scanner = next(
+    sensor
+    for sensor in make_navigation_v5_mixed_obstacle_env_cfg().scene.sensors
+    if sensor.name == "height_scanner"
+  )
+  assert isinstance(scanner.pattern, OffsetGridPatternCfg)
+  assert scanner.pattern.origin_offset == (0.0, 0.0, 20.0)
+  assert scanner.max_distance == 100.0
+
+
+def test_low_level_native_foot_height_reward_sensor_is_not_an_observation():
+  cfg = make_low_level_env_cfg()
+  scanner = next(
+    sensor for sensor in cfg.scene.sensors if sensor.name == "foot_height_scan"
+  )
+  assert isinstance(scanner, TerrainHeightSensorCfg)
+  assert isinstance(scanner.pattern, RingPatternCfg)
+  assert scanner.pattern.rings == (RingPatternCfg.Ring(0.03, 6),)
+  assert tuple(frame.name for frame in scanner.frame) == ("left_foot", "right_foot")
+  assert all("height" not in group.terms for group in cfg.observations.values())
 
 
 def test_homework_todo_boundaries_are_all_preserved():
@@ -189,7 +205,18 @@ def test_g1_sdk_order_and_locomotion_default_builtin_position_controller():
   stock_groups = [
     cast(BuiltinPositionActuatorCfg, group) for group in stock.articulation.actuators
   ]
+  assert cfg.init_state == stock.init_state
   assert cfg.articulation.soft_joint_pos_limit_factor == 1.0
+  action_cfg = make_low_level_actions()["joint_pos"]
+  assert isinstance(action_cfg, JointPositionActionCfg)
+  assert action_cfg.scale == G1_ACTION_SCALE
+
+  navigation_action_cfg = make_navigation_v5_mixed_obstacle_env_cfg().actions[
+    "pre_trained_policy_action"
+  ]
+  assert isinstance(navigation_action_cfg, PreTrainedPolicyActionCfg)
+  assert isinstance(navigation_action_cfg.low_level_actions, JointPositionActionCfg)
+  assert navigation_action_cfg.low_level_actions.scale == G1_ACTION_SCALE
   assert len(groups) == len(stock_groups) == 6
   for group, stock_group in zip(groups, stock_groups, strict=True):
     assert group.target_names_expr == stock_group.target_names_expr
@@ -272,10 +299,11 @@ def test_low_level_runtime_native_foot_friction_and_position_routing():
     env.common_step_counter = 3000 * 24
     env.curriculum_manager.compute(env_ids)
     assert command_cfg.ranges.lin_vel_x == (-1.5, 2.0)
-    assert command_cfg.ranges.ang_vel_z == (-0.7, 0.7)
+    assert command_cfg.ranges.ang_vel_z == (-0.5, 0.5)
     env.common_step_counter = 6000 * 24
     env.curriculum_manager.compute(env_ids)
     assert command_cfg.ranges.lin_vel_x == (-2.0, 3.0)
+    assert command_cfg.ranges.ang_vel_z == (-0.7, 0.7)
 
     for actuator in robot.actuators:
       assert isinstance(actuator, BuiltinPositionActuator)
@@ -288,14 +316,18 @@ def test_low_level_runtime_native_foot_friction_and_position_routing():
     env.close()
 
 
-def test_low_level_material_command_curriculum_and_play_match_native_flat_g1():
+def test_low_level_material_and_velocity_command_match_native_flat_g1():
   native = unitree_g1_flat_env_cfg()
-  native_play = unitree_g1_flat_env_cfg(play=True)
   base = make_low_level_env_cfg(sequential=False)
   sequential = make_low_level_env_cfg(sequential=True)
   play = make_low_level_env_cfg(sequential=True, play=True)
 
   native_command = cast(UniformVelocityCommandCfg, native.commands["twist"])
+  expected_stages = [
+    {"step": 0, "lin_vel_x": (-1.0, 1.0), "ang_vel_z": (-0.3, 0.3)},
+    {"step": 3000 * 24, "lin_vel_x": (-1.5, 2.0), "ang_vel_z": (-0.5, 0.5)},
+    {"step": 6000 * 24, "lin_vel_x": (-2.0, 3.0), "ang_vel_z": (-0.7, 0.7)},
+  ]
   for cfg in (base, sequential):
     command = cast(UniformVelocityCommandCfg, cfg.commands["base_velocity"])
     assert type(command) is UniformVelocityCommandCfg
@@ -307,18 +339,9 @@ def test_low_level_material_command_curriculum_and_play_match_native_flat_g1():
     assert command.heading_control_stiffness == native_command.heading_control_stiffness
     assert command.ranges == native_command.ranges
 
-    assert set(cfg.curriculum) == set(native.curriculum) == {"command_vel"}
+    assert set(cfg.curriculum) == {"command_vel"}
     assert cfg.curriculum["command_vel"].func is native.curriculum["command_vel"].func
-    velocity_stages = cfg.curriculum["command_vel"].params["velocity_stages"]
-    native_stages = native.curriculum["command_vel"].params["velocity_stages"]
-    assert [stage["step"] for stage in velocity_stages] == [0, 3000 * 24, 6000 * 24]
-    assert [
-      {key: value for key, value in stage.items() if key != "step"}
-      for stage in velocity_stages
-    ] == [
-      {key: value for key, value in stage.items() if key != "step"}
-      for stage in native_stages
-    ]
+    assert cfg.curriculum["command_vel"].params["velocity_stages"] == expected_stages
 
     material = cfg.events["foot_friction"]
     native_material = native.events["foot_friction"]
@@ -332,6 +355,10 @@ def test_low_level_material_command_curriculum_and_play_match_native_flat_g1():
       == native_material.params["asset_cfg"].geom_names
     )
     assert "physics_material" not in cfg.events
+    joint_default_event = cfg.events["add_joint_default_pos"]
+    assert joint_default_event.mode == "startup"
+    assert joint_default_event.params["pos_distribution_params"] == (-0.01, 0.01)
+    assert joint_default_event.params["operation"] == "add"
 
     assert cfg.scene.terrain is not None
     assert cfg.scene.terrain.terrain_generator is not None
@@ -339,17 +366,56 @@ def test_low_level_material_command_curriculum_and_play_match_native_flat_g1():
 
   assert base.events["add_base_mass"].params["ranges"] == (-1.0, 3.0)
   assert sequential.events["add_base_mass"].params["ranges"] == (-0.5, 1.0)
-  assert base.events["push_robot"].params["velocity_range"]["x"] == (-0.3, 0.3)
+  for cfg in (base, sequential):
+    for event_name in ("reset_base", "reset_robot_joints", "push_robot"):
+      event = cfg.events[event_name]
+      native_event = native.events[event_name]
+      assert event.func is native_event.func
+      assert event.mode == native_event.mode
+      assert event.interval_range_s == native_event.interval_range_s
+      assert event.params == native_event.params
+    assert "base_external_force_torque" not in cfg.events
+
+    assert list(cfg.terminations) == list(native.terminations)
+    for termination_name, native_termination in native.terminations.items():
+      termination = cfg.terminations[termination_name]
+      assert termination.func is native_termination.func
+      assert termination.params == native_termination.params
+      assert termination.time_out == native_termination.time_out
 
   play_command = cast(UniformVelocityCommandCfg, play.commands["base_velocity"])
-  native_play_command = cast(UniformVelocityCommandCfg, native_play.commands["twist"])
-  assert play_command.ranges == native_play_command.ranges
-  assert play.curriculum == native_play.curriculum == {}
+  assert play_command.ranges.lin_vel_x == (-2.0, 3.0)
+  assert play_command.ranges.ang_vel_z == (-0.7, 0.7)
+  assert play.curriculum == {}
   assert play.scene.terrain is not None
   assert play.scene.terrain.terrain_generator is not None
   assert play.scene.terrain.terrain_generator.num_rows == 2
   assert play.scene.terrain.terrain_generator.num_cols == 10
   assert not play.scene.terrain.terrain_generator.curriculum
+
+
+def test_low_level_rewards_match_native_flat_g1_without_height_tracking():
+  native = unitree_g1_flat_env_cfg()
+  low_level = make_low_level_env_cfg()
+
+  assert list(low_level.rewards) == list(native.rewards)
+  assert "base_height" not in low_level.commands
+  assert "track_base_height" not in low_level.rewards
+  assert all(
+    not any("height_command" in term_name for term_name in group.terms)
+    for group in low_level.observations.values()
+  )
+
+  for name, native_term in native.rewards.items():
+    low_level_term = low_level.rewards[name]
+    assert low_level_term.func is native_term.func
+    assert low_level_term.weight == native_term.weight
+    low_level_params = dict(low_level_term.params)
+    native_params = dict(native_term.params)
+    if "command_name" in native_params:
+      assert native_params.pop("command_name") == "twist"
+      assert low_level_params.pop("command_name") == "base_velocity"
+    assert low_level_params == native_params
 
 
 def test_fixed_map_reset_event_precedes_robot_reset():

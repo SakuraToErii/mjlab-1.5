@@ -35,14 +35,11 @@ def _stage(
     "foot_friction": (0.7, 1.0) if push_velocity == 0.0 else (0.5, 1.1),
     "encoder_bias": (-0.003, 0.003),
     "base_com": {0: (-0.005, 0.005)},
-    "timeout_threshold": 0.9,
-    "max_mean_lin_vel_error": 0.15,
-    "max_mean_yaw_vel_error": 0.15,
   }
 
 
 def _make_term() -> tuple[FlatEffortCurriculum, Any, dict[str, Any]]:
-  num_envs = 4
+  num_envs = 20
   command_cfg = SimpleNamespace(
     ranges=SimpleNamespace(
       lin_vel_x=(-1.0, 1.0),
@@ -50,15 +47,8 @@ def _make_term() -> tuple[FlatEffortCurriculum, Any, dict[str, Any]]:
       ang_vel_z=(-0.5, 0.5),
     ),
     rel_standing_envs=0.1,
-    resampling_time_range=(3.0, 8.0),
   )
-  command_term = SimpleNamespace(
-    cfg=command_cfg,
-    metrics={
-      "error_vel_xy": torch.zeros(num_envs),
-      "error_vel_yaw": torch.zeros(num_envs),
-    },
-  )
+  command_term = SimpleNamespace(cfg=command_cfg)
   command_manager = Mock()
   command_manager.get_term.return_value = command_term
 
@@ -98,6 +88,8 @@ def _make_term() -> tuple[FlatEffortCurriculum, Any, dict[str, Any]]:
       _stage("slow", push_velocity=0.1, standing=0.5, noise=0.75),
     ],
     "min_episodes": num_envs,
+    "promotion_timeout_threshold": 0.95,
+    "demotion_timeout_threshold": 0.5,
   }
   cfg = CurriculumTermCfg(func=FlatEffortCurriculum, params=params)
   mock_env = cast(ManagerBasedRlEnv, env)
@@ -108,38 +100,20 @@ def _set_episode_window(
   env: Any,
   *,
   timeout_count: int,
-  mean_lin_vel_error: float,
-  mean_yaw_vel_error: float,
 ) -> None:
   env.episode_length_buf[:] = 1000
   env.termination_manager.time_outs[:] = False
   env.termination_manager.time_outs[:timeout_count] = True
 
-  command_term = env.command_manager.get_term("twist")
-  max_command_steps = command_term.cfg.resampling_time_range[1] / env.step_dt
-  command_term.metrics["error_vel_xy"][:] = (
-    mean_lin_vel_error * env.episode_length_buf / max_command_steps
-  )
-  command_term.metrics["error_vel_yaw"][:] = (
-    mean_yaw_vel_error * env.episode_length_buf / max_command_steps
-  )
-
 
 def test_flat_effort_curriculum_advances_from_episode_performance() -> None:
   term, env, params = _make_term()
-  _set_episode_window(
-    env,
-    timeout_count=4,
-    mean_lin_vel_error=0.1,
-    mean_yaw_vel_error=0.1,
-  )
+  _set_episode_window(env, timeout_count=20)
 
   state = term(env, torch.arange(env.num_envs), **params)
 
   assert state["stage"] == 1.0
   assert state["timeout_ratio"] == pytest.approx(1.0)
-  assert state["mean_lin_vel_error"] == pytest.approx(0.1)
-  assert state["mean_yaw_vel_error"] == pytest.approx(0.1)
   assert state["push_velocity"] == pytest.approx(0.1)
 
   command_cfg = env.command_manager.get_term("twist").cfg
@@ -153,21 +127,35 @@ def test_flat_effort_curriculum_advances_from_episode_performance() -> None:
   assert isinstance(noise_cfg, UniformNoiseCfg)
   assert noise_cfg.n_min == pytest.approx(-0.75)
   assert noise_cfg.n_max == pytest.approx(0.75)
-  env.event_manager.apply.assert_called_once_with(mode="startup")
+  env.event_manager.apply.assert_not_called()
 
 
-def test_flat_effort_curriculum_holds_stage_until_all_thresholds_pass() -> None:
+def test_flat_effort_curriculum_requires_more_than_ninety_five_percent_timeouts() -> (
+  None
+):
   term, env, params = _make_term()
-  _set_episode_window(
-    env,
-    timeout_count=3,
-    mean_lin_vel_error=0.1,
-    mean_yaw_vel_error=0.1,
-  )
+  _set_episode_window(env, timeout_count=19)
 
   state = term(env, torch.arange(env.num_envs), **params)
 
   assert state["stage"] == 0.0
-  assert state["timeout_ratio"] == pytest.approx(0.75)
+  assert state["timeout_ratio"] == pytest.approx(0.95)
   assert state["window_episodes"] == 0.0
+  env.event_manager.apply.assert_not_called()
+
+
+def test_flat_effort_curriculum_demotes_below_fifty_percent_timeouts() -> None:
+  term, env, params = _make_term()
+  _set_episode_window(env, timeout_count=20)
+  assert term(env, torch.arange(env.num_envs), **params)["stage"] == 1.0
+
+  _set_episode_window(env, timeout_count=10)
+  state = term(env, torch.arange(env.num_envs), **params)
+  assert state["stage"] == 1.0
+  assert state["timeout_ratio"] == pytest.approx(0.5)
+
+  _set_episode_window(env, timeout_count=9)
+  state = term(env, torch.arange(env.num_envs), **params)
+  assert state["stage"] == 0.0
+  assert state["timeout_ratio"] == pytest.approx(0.45)
   env.event_manager.apply.assert_not_called()

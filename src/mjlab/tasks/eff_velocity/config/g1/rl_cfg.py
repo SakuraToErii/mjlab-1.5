@@ -54,7 +54,7 @@ def unitree_g1_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       obs_normalization=False,
       distribution_cfg={
         "class_name": "GaussianDistribution",
-        "init_std": 0.1,
+        "init_std": 0.25,
         "std_type": "log",
       },
       output_gain=0.01,
@@ -81,7 +81,7 @@ def unitree_g1_ppo_mha_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       obs_normalization=False,
       distribution_cfg={
         "class_name": "GaussianDistribution",
-        "init_std": 0.1,
+        "init_std": 0.25,
         "std_type": "log",
       },
       output_gain=0.01,

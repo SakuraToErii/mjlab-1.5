@@ -235,7 +235,7 @@ def make_eff_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       },
     ),
     "foot_friction": EventTermCfg(
-      mode="startup",
+      mode="reset",
       func=dr.geom_friction,
       params={
         "asset_cfg": SceneEntityCfg("robot", geom_names=()),  # Set per-robot.
@@ -245,7 +245,7 @@ def make_eff_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       },
     ),
     "encoder_bias": EventTermCfg(
-      mode="startup",
+      mode="reset",
       func=dr.encoder_bias,
       params={
         "asset_cfg": SceneEntityCfg("robot"),
@@ -253,7 +253,7 @@ def make_eff_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       },
     ),
     "base_com": EventTermCfg(
-      mode="startup",
+      mode="reset",
       func=dr.body_com_offset,
       params={
         "asset_cfg": SceneEntityCfg("robot", body_names=()),  # Set per-robot.

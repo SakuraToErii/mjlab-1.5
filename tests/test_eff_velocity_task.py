@@ -175,7 +175,13 @@ def test_flat_effort_curriculum_is_performance_gated() -> None:
   term_cfg = cfg.curriculum["flat_effort_stages"]
   assert term_cfg.func is mdp.FlatEffortCurriculum
   assert term_cfg.params["min_episodes"] == 4096
+  assert term_cfg.params["promotion_timeout_threshold"] == 0.95
+  assert term_cfg.params["demotion_timeout_threshold"] == 0.5
   assert all("step" not in stage for stage in term_cfg.params["stages"])
+  assert all(
+    "max_mean_lin_vel_error" not in stage and "max_mean_yaw_vel_error" not in stage
+    for stage in term_cfg.params["stages"]
+  )
 
   stages = term_cfg.params["stages"]
   assert [stage["push_velocity"] for stage in stages] == [
@@ -190,6 +196,9 @@ def test_flat_effort_curriculum_is_performance_gated() -> None:
   assert stages[0]["lin_vel_x"] == (0.0, 0.0)
   assert stages[-1]["lin_vel_x"] == (-0.4, 0.6)
   assert cfg.events["push_robot"].interval_range_s == (5.0, 5.0)
+  assert cfg.events["foot_friction"].mode == "reset"
+  assert cfg.events["encoder_bias"].mode == "reset"
+  assert cfg.events["base_com"].mode == "reset"
 
 
 def test_mha_variants_only_add_observation_history() -> None:
@@ -225,7 +234,7 @@ def test_ppo_configs_use_effort_initialization_and_mha_model() -> None:
   assert resolve_callable(mha_cfg.actor.class_name) is ResidualMhaModel
   assert ppo_cfg.actor.distribution_cfg == {
     "class_name": "GaussianDistribution",
-    "init_std": 0.1,
+    "init_std": 0.25,
     "std_type": "log",
   }
   assert mha_cfg.actor.distribution_cfg == ppo_cfg.actor.distribution_cfg
@@ -244,7 +253,7 @@ def test_residual_models_center_actor_output_and_export_mha() -> None:
   output_dim = 29
   distribution_cfg = {
     "class_name": "GaussianDistribution",
-    "init_std": 0.1,
+    "init_std": 0.25,
     "std_type": "log",
   }
 

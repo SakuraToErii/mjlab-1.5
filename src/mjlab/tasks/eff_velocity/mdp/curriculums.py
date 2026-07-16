@@ -38,9 +38,6 @@ class FlatEffortStage(TypedDict):
   foot_friction: tuple[float, float]
   encoder_bias: tuple[float, float]
   base_com: dict[int, tuple[float, float]]
-  timeout_threshold: float
-  max_mean_lin_vel_error: float
-  max_mean_yaw_vel_error: float
 
 
 class FlatEffortCurriculum(ManagerTermBase):
@@ -52,18 +49,20 @@ class FlatEffortCurriculum(ManagerTermBase):
     self._push_event_name = cast(str, cfg.params["push_event_name"])
     self._stages = tuple(cast(list[FlatEffortStage], cfg.params["stages"]))
     self._min_episodes = cast(int, cfg.params["min_episodes"])
+    self._promotion_timeout_threshold = cast(
+      float, cfg.params["promotion_timeout_threshold"]
+    )
+    self._demotion_timeout_threshold = cast(
+      float, cfg.params["demotion_timeout_threshold"]
+    )
 
     self._stage = 0
     self._window_episodes = 0
     self._window_timeouts = 0
-    self._window_lin_vel_error = 0.0
-    self._window_yaw_vel_error = 0.0
     self._last_timeout_ratio = 0.0
-    self._last_mean_lin_vel_error = 0.0
-    self._last_mean_yaw_vel_error = 0.0
-    self._apply_stage(rerandomize_startup=False)
+    self._apply_stage()
 
-  def _apply_stage(self, *, rerandomize_startup: bool) -> None:
+  def _apply_stage(self) -> None:
     stage = self._stages[self._stage]
 
     command_term = cast(
@@ -107,9 +106,6 @@ class FlatEffortCurriculum(ManagerTermBase):
       stage["base_com"]
     )
 
-    if rerandomize_startup:
-      self._env.event_manager.apply(mode="startup")
-
   def _accumulate_completed_episodes(
     self,
     env: ManagerBasedRlEnv,
@@ -122,52 +118,31 @@ class FlatEffortCurriculum(ManagerTermBase):
     if len(completed_ids) == 0:
       return
 
-    episode_steps = env.episode_length_buf[completed_ids].float().clamp_min(1.0)
-    command_term = cast(
-      UniformVelocityCommand,
-      env.command_manager.get_term(self._command_name),
-    )
-    max_command_steps = command_term.cfg.resampling_time_range[1] / env.step_dt
-    lin_vel_error = (
-      command_term.metrics["error_vel_xy"][completed_ids]
-      * max_command_steps
-      / episode_steps
-    )
-    yaw_vel_error = (
-      command_term.metrics["error_vel_yaw"][completed_ids]
-      * max_command_steps
-      / episode_steps
-    )
-
     self._window_episodes += len(completed_ids)
     self._window_timeouts += int(
       torch.count_nonzero(env.termination_manager.time_outs[completed_ids]).item()
     )
-    self._window_lin_vel_error += float(torch.sum(lin_vel_error).item())
-    self._window_yaw_vel_error += float(torch.sum(yaw_vel_error).item())
 
   def _evaluate_window(self) -> None:
     if self._window_episodes < self._min_episodes:
       return
 
     self._last_timeout_ratio = self._window_timeouts / self._window_episodes
-    self._last_mean_lin_vel_error = self._window_lin_vel_error / self._window_episodes
-    self._last_mean_yaw_vel_error = self._window_yaw_vel_error / self._window_episodes
 
-    stage = self._stages[self._stage]
-    ready = (
-      self._last_timeout_ratio >= stage["timeout_threshold"]
-      and self._last_mean_lin_vel_error <= stage["max_mean_lin_vel_error"]
-      and self._last_mean_yaw_vel_error <= stage["max_mean_yaw_vel_error"]
-    )
-    if ready and self._stage < len(self._stages) - 1:
+    if (
+      self._last_timeout_ratio > self._promotion_timeout_threshold
+      and self._stage < len(self._stages) - 1
+    ):
       self._stage += 1
-      self._apply_stage(rerandomize_startup=True)
+      self._apply_stage()
+    elif (
+      self._last_timeout_ratio < self._demotion_timeout_threshold and self._stage > 0
+    ):
+      self._stage -= 1
+      self._apply_stage()
 
     self._window_episodes = 0
     self._window_timeouts = 0
-    self._window_lin_vel_error = 0.0
-    self._window_yaw_vel_error = 0.0
 
   def __call__(
     self,
@@ -177,15 +152,22 @@ class FlatEffortCurriculum(ManagerTermBase):
     push_event_name: str,
     stages: list[FlatEffortStage],
     min_episodes: int,
+    promotion_timeout_threshold: float,
+    demotion_timeout_threshold: float,
   ) -> dict[str, float]:
-    del command_name, push_event_name, stages, min_episodes
+    del (
+      command_name,
+      push_event_name,
+      stages,
+      min_episodes,
+      promotion_timeout_threshold,
+      demotion_timeout_threshold,
+    )
     self._accumulate_completed_episodes(env, env_ids)
     self._evaluate_window()
     return {
       "stage": float(self._stage),
       "timeout_ratio": self._last_timeout_ratio,
-      "mean_lin_vel_error": self._last_mean_lin_vel_error,
-      "mean_yaw_vel_error": self._last_mean_yaw_vel_error,
       "window_episodes": float(self._window_episodes),
       "push_velocity": self._stages[self._stage]["push_velocity"],
     }

@@ -54,9 +54,6 @@ def _flat_effort_curriculum_stages() -> list[mdp.FlatEffortStage]:
         1: (-0.025, 0.025),
         2: (-0.03, 0.03),
       },
-      "timeout_threshold": 0.8,
-      "max_mean_lin_vel_error": 0.35,
-      "max_mean_yaw_vel_error": 0.25,
     }
 
   return [
@@ -75,9 +72,6 @@ def _flat_effort_curriculum_stages() -> list[mdp.FlatEffortStage]:
         1: (-0.005, 0.005),
         2: (-0.006, 0.006),
       },
-      "timeout_threshold": 0.9,
-      "max_mean_lin_vel_error": 0.15,
-      "max_mean_yaw_vel_error": 0.15,
     },
     {
       "name": "slow_locomotion",
@@ -94,9 +88,6 @@ def _flat_effort_curriculum_stages() -> list[mdp.FlatEffortStage]:
         1: (-0.0125, 0.0125),
         2: (-0.015, 0.015),
       },
-      "timeout_threshold": 0.85,
-      "max_mean_lin_vel_error": 0.25,
-      "max_mean_yaw_vel_error": 0.2,
     },
     robust_stage("flat_robust_push_0_2", 0.2),
     robust_stage("flat_robust_push_0_3", 0.3),
@@ -144,6 +135,8 @@ def _configure_flat_effort_curriculum(cfg: ManagerBasedRlEnvCfg) -> None:
         "push_event_name": "push_robot",
         "stages": stages,
         "min_episodes": 4096,
+        "promotion_timeout_threshold": 0.95,
+        "demotion_timeout_threshold": 0.5,
       },
     )
   }

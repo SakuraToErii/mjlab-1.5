@@ -1,3 +1,5 @@
+from mjlab.envs.mdp.actions.actions import BaseAction as BaseAction
+from mjlab.envs.mdp.actions.actions import BaseActionCfg as BaseActionCfg
 from mjlab.envs.mdp.actions.actions import JointEffortAction as JointEffortAction
 from mjlab.envs.mdp.actions.actions import JointEffortActionCfg as JointEffortActionCfg
 from mjlab.envs.mdp.actions.actions import JointPositionAction as JointPositionAction

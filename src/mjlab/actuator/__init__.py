@@ -58,5 +58,9 @@ from mjlab.actuator.learned_actuator import (
 )
 from mjlab.actuator.pd_actuator import IdealPdActuator as IdealPdActuator
 from mjlab.actuator.pd_actuator import IdealPdActuatorCfg as IdealPdActuatorCfg
+from mjlab.actuator.unitree_actuator import UnitreeActuator as UnitreeActuator
+from mjlab.actuator.unitree_actuator import (
+  UnitreeActuatorCfg as UnitreeActuatorCfg,
+)
 from mjlab.actuator.xml_actuator import XmlActuator as XmlActuator
 from mjlab.actuator.xml_actuator import XmlActuatorCfg as XmlActuatorCfg

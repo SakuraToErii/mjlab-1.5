@@ -33,6 +33,8 @@ mjlab.actuator
   - :class:`IdealPdActuatorCfg`
   - :class:`DcMotorActuator`
   - :class:`DcMotorActuatorCfg`
+  - :class:`UnitreeActuator`
+  - :class:`UnitreeActuatorCfg`
   - :class:`LearnedMlpActuator`
   - :class:`LearnedMlpActuatorCfg`
 
@@ -166,6 +168,18 @@ DC Motor Actuator
   :show-inheritance:
 
 .. autoclass:: DcMotorActuatorCfg
+  :members:
+  :exclude-members: __init__
+  :undoc-members:
+
+Unitree Actuator
+----------------
+
+.. autoclass:: UnitreeActuator
+  :members:
+  :show-inheritance:
+
+.. autoclass:: UnitreeActuatorCfg
   :members:
   :exclude-members: __init__
   :undoc-members:

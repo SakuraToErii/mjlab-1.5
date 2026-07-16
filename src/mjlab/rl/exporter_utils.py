@@ -5,7 +5,7 @@ import torch
 
 from mjlab.entity import Entity
 from mjlab.envs import ManagerBasedRlEnv
-from mjlab.envs.mdp.actions import JointPositionAction
+from mjlab.envs.mdp.actions import BaseAction
 
 
 def list_to_csv_str(arr, *, decimals: int = 3, delimiter: str = ",") -> str:
@@ -32,8 +32,18 @@ def get_base_metadata(
     Dictionary of metadata fields that are common across all tasks.
   """
   robot: Entity = env.scene["robot"]
-  joint_action = env.action_manager.get_term("joint_pos")
-  assert isinstance(joint_action, JointPositionAction)
+  action_term_names = env.action_manager.active_terms
+  if len(action_term_names) != 1:
+    raise ValueError(
+      "Policy export metadata requires exactly one affine action term, "
+      f"received {action_term_names}."
+    )
+  action = env.action_manager.get_term(action_term_names[0])
+  if not isinstance(action, BaseAction):
+    raise TypeError(
+      "Policy export metadata requires a BaseAction-compatible action term, "
+      f"received {type(action).__name__}."
+    )
   # Build mapping from joint name to actuator ID for natural joint order.
   # Each spec actuator controls exactly one joint (via its target field).
   joint_name_to_ctrl_id = {}
@@ -56,9 +66,14 @@ def get_base_metadata(
     "default_joint_pos": robot.data.default_joint_pos[0].cpu().tolist(),
     "command_names": list(env.command_manager.active_terms),
     "observation_names": env.observation_manager.active_terms["actor"],
-    "action_scale": joint_action._scale[0].cpu().tolist()
-    if isinstance(joint_action._scale, torch.Tensor)
-    else joint_action._scale,
+    "action_term": action_term_names[0],
+    "action_names": action.target_names,
+    "action_scale": action.scale[0].cpu().tolist()
+    if isinstance(action.scale, torch.Tensor)
+    else action.scale,
+    "action_offset": action.offset[0].cpu().tolist()
+    if isinstance(action.offset, torch.Tensor)
+    else action.offset,
   }
 
 

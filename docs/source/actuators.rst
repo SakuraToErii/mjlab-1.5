@@ -68,7 +68,7 @@ velocity-dependent damping forces implicitly. This provides the best
 numerical stability, particularly with high gains or large timesteps.
 
 **Explicit actuators** (``IdealPdActuator``, ``DcMotorActuator``,
-``LearnedMlpActuator``) compute torques in user code and forward them
+``UnitreeActuator``, ``LearnedMlpActuator``) compute torques in user code and forward them
 through a ``<motor>`` actuator acting as a passthrough. Because the
 integrator cannot account for the velocity derivatives of these
 externally computed forces, they are less numerically robust than built-in
@@ -184,6 +184,10 @@ torque saturation to model DC motor torque-speed curves (back-EMF
 effects). Implements a linear torque-speed curve: maximum torque at zero
 velocity, zero torque at maximum velocity.
 
+**UnitreeActuator**: Extends ``IdealPdActuator`` with Unitree's asymmetric
+four-parameter torque-speed envelope and a smooth static-plus-viscous
+friction model. Its command lag is sampled per environment at reset.
+
 **LearnedMlpActuator**: Neural network-based actuator that uses a
 trained MLP to predict torque outputs from joint state history. Useful
 when analytical models cannot capture complex actuator dynamics like
@@ -210,6 +214,23 @@ velocity-based torque limits.
             saturation_effort=50.0,  # Peak torque at stall
             velocity_limit=30.0,     # No-load speed (rad/s)
         ),
+    )
+
+Unitree motor presets keep hardware parameters in the asset zoo while task
+configs supply joint matching and PD gains.
+
+.. code-block:: python
+
+    from mjlab.asset_zoo.robots.unitree_actuators import (
+        UnitreeN7520_14p3ActuatorCfg,
+    )
+
+    hip_actuator = UnitreeN7520_14p3ActuatorCfg(
+        target_names_expr=(".*_hip_pitch_joint", ".*_hip_yaw_joint"),
+        stiffness=80.0,
+        damping=5.0,
+        delay_min_lag=0,
+        delay_max_lag=2,
     )
 
 

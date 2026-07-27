@@ -33,7 +33,7 @@ def _ppo_algorithm_cfg() -> RslRlPpoAlgorithmCfg:
     value_loss_coef=1.0,
     use_clipped_value_loss=True,
     clip_param=0.2,
-    entropy_coef=0.001,
+    entropy_coef=0.01,
     num_learning_epochs=5,
     num_mini_batches=4,
     learning_rate=1.0e-3,
@@ -54,7 +54,7 @@ def unitree_g1_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       obs_normalization=False,
       distribution_cfg={
         "class_name": "GaussianDistribution",
-        "init_std": 0.1,
+        "init_std": 1.0,
         "std_type": "log",
       },
       output_gain=0.01,
@@ -81,7 +81,7 @@ def unitree_g1_ppo_mha_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       obs_normalization=False,
       distribution_cfg={
         "class_name": "GaussianDistribution",
-        "init_std": 0.1,
+        "init_std": 1.0,
         "std_type": "log",
       },
       output_gain=0.01,

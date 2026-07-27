@@ -167,6 +167,10 @@ def test_rewards_match_mjlab_velocity_and_rough_curriculum_is_preserved() -> Non
       effort_cfg.rewards["base_height"].params["target_height"]
       == EFFORT_STANDING_ROOT_HEIGHT
     )
+    assert effort_rewards["track_linear_velocity"].weight == 4.0
+    effort_rewards["track_linear_velocity"] = position_cfg.rewards[
+      "track_linear_velocity"
+    ]
     assert _manager_term_contract(effort_rewards) == _manager_term_contract(
       position_cfg.rewards
     )
@@ -223,12 +227,12 @@ def test_ppo_configs_use_effort_initialization_and_mha_model() -> None:
   assert resolve_callable(mha_cfg.actor.class_name) is ResidualMhaModel
   assert ppo_cfg.actor.distribution_cfg == {
     "class_name": "GaussianDistribution",
-    "init_std": 0.1,
+    "init_std": 1.0,
     "std_type": "log",
   }
   assert mha_cfg.actor.distribution_cfg == ppo_cfg.actor.distribution_cfg
-  assert ppo_cfg.algorithm.entropy_coef == 0.001
-  assert mha_cfg.algorithm.entropy_coef == 0.001
+  assert ppo_cfg.algorithm.entropy_coef == 0.01
+  assert mha_cfg.algorithm.entropy_coef == 0.01
   assert ppo_cfg.max_iterations == 50_000
   assert mha_cfg.max_iterations == 10_000
 

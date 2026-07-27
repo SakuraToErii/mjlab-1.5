@@ -227,7 +227,7 @@ def test_ppo_configs_use_effort_initialization_and_mha_model() -> None:
   assert resolve_callable(mha_cfg.actor.class_name) is ResidualMhaModel
   assert ppo_cfg.actor.distribution_cfg == {
     "class_name": "GaussianDistribution",
-    "init_std": 1.0,
+    "init_std": 0.3,
     "std_type": "log",
   }
   assert mha_cfg.actor.distribution_cfg == ppo_cfg.actor.distribution_cfg

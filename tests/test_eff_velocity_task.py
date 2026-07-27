@@ -12,7 +12,6 @@ from mjlab.actuator import UnitreeActuatorCfg
 from mjlab.entity import Entity
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.envs.mdp.actions import JointEffortActionCfg
-from mjlab.tasks.eff_velocity import mdp
 from mjlab.tasks.eff_velocity.config.g1.action_cfg import (
   EFFORT_ACTION_CLIP,
   EFFORT_ACTION_LIMIT,
@@ -154,12 +153,21 @@ def test_residual_effort_action_matches_motor_limits_and_nominal_torque() -> Non
 
 
 def test_rewards_match_mjlab_velocity_and_rough_curriculum_is_preserved() -> None:
+  anti_fall_rewards = ("base_height", "flat_orientation", "lin_vel_z")
   pairs = (
     (unitree_g1_rough_env_cfg(), unitree_g1_position_rough_env_cfg()),
     (unitree_g1_flat_env_cfg(), unitree_g1_position_flat_env_cfg()),
   )
   for effort_cfg, position_cfg in pairs:
-    assert _manager_term_contract(effort_cfg.rewards) == _manager_term_contract(
+    effort_rewards = dict(effort_cfg.rewards)
+    for name in anti_fall_rewards:
+      term = effort_rewards.pop(name)
+      assert term.weight < 0.0
+    assert (
+      effort_cfg.rewards["base_height"].params["target_height"]
+      == EFFORT_STANDING_ROOT_HEIGHT
+    )
+    assert _manager_term_contract(effort_rewards) == _manager_term_contract(
       position_cfg.rewards
     )
 
@@ -168,37 +176,18 @@ def test_rewards_match_mjlab_velocity_and_rough_curriculum_is_preserved() -> Non
   ) == _manager_term_contract(unitree_g1_position_rough_env_cfg().curriculum)
 
 
-def test_flat_effort_curriculum_is_performance_gated() -> None:
-  cfg = unitree_g1_flat_env_cfg()
-  assert list(cfg.curriculum) == ["flat_effort_stages"]
-
-  term_cfg = cfg.curriculum["flat_effort_stages"]
-  assert term_cfg.func is mdp.FlatEffortCurriculum
-  assert term_cfg.params["min_episodes"] == 4096
-  assert term_cfg.params["promotion_timeout_threshold"] == 0.95
-  assert term_cfg.params["demotion_timeout_threshold"] == 0.5
-  assert all("step" not in stage for stage in term_cfg.params["stages"])
-  assert all(
-    "max_mean_lin_vel_error" not in stage and "max_mean_yaw_vel_error" not in stage
-    for stage in term_cfg.params["stages"]
+def test_flat_effort_curriculum_matches_velocity_flat() -> None:
+  effort_cfg = unitree_g1_flat_env_cfg()
+  position_cfg = unitree_g1_position_flat_env_cfg()
+  assert list(effort_cfg.curriculum) == ["command_vel"]
+  assert _manager_term_contract(effort_cfg.curriculum) == _manager_term_contract(
+    position_cfg.curriculum
   )
-
-  stages = term_cfg.params["stages"]
-  assert [stage["push_velocity"] for stage in stages] == [
-    0.0,
-    0.1,
-    0.2,
-    0.3,
-    0.4,
-    0.5,
+  assert effort_cfg.curriculum["command_vel"].params["velocity_stages"] == [
+    {"step": 0, "lin_vel_x": (-1.0, 1.0), "ang_vel_z": (-0.5, 0.5)},
+    {"step": 5000 * 24, "lin_vel_x": (-1.5, 2.0), "ang_vel_z": (-0.7, 0.7)},
+    {"step": 10000 * 24, "lin_vel_x": (-2.0, 3.0)},
   ]
-  assert stages[0]["rel_standing_envs"] == 1.0
-  assert stages[0]["lin_vel_x"] == (0.0, 0.0)
-  assert stages[-1]["lin_vel_x"] == (-0.4, 0.6)
-  assert cfg.events["push_robot"].interval_range_s == (5.0, 5.0)
-  assert cfg.events["foot_friction"].mode == "reset"
-  assert cfg.events["encoder_bias"].mode == "reset"
-  assert cfg.events["base_com"].mode == "reset"
 
 
 def test_mha_variants_only_add_observation_history() -> None:
@@ -234,7 +223,7 @@ def test_ppo_configs_use_effort_initialization_and_mha_model() -> None:
   assert resolve_callable(mha_cfg.actor.class_name) is ResidualMhaModel
   assert ppo_cfg.actor.distribution_cfg == {
     "class_name": "GaussianDistribution",
-    "init_std": 0.25,
+    "init_std": 0.1,
     "std_type": "log",
   }
   assert mha_cfg.actor.distribution_cfg == ppo_cfg.actor.distribution_cfg
@@ -253,7 +242,7 @@ def test_residual_models_center_actor_output_and_export_mha() -> None:
   output_dim = 29
   distribution_cfg = {
     "class_name": "GaussianDistribution",
-    "init_std": 0.25,
+    "init_std": 0.1,
     "std_type": "log",
   }
 

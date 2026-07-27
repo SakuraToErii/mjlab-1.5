@@ -44,6 +44,25 @@ def track_linear_velocity(
   return torch.exp(-lin_vel_error / std**2)
 
 
+def lin_vel_z_l2(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize base vertical velocity (L2 squared)."""
+  asset: Entity = env.scene[asset_cfg.name]
+  return torch.square(asset.data.root_link_lin_vel_b[:, 2])
+
+
+def base_height_l2(
+  env: ManagerBasedRlEnv,
+  target_height: float,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize deviation of root height from a target (L2 squared)."""
+  asset: Entity = env.scene[asset_cfg.name]
+  return torch.square(asset.data.root_link_pos_w[:, 2] - target_height)
+
+
 def track_angular_velocity(
   env: ManagerBasedRlEnv,
   std: float,

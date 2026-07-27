@@ -2,7 +2,6 @@
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
-from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.sensor import (
@@ -16,130 +15,9 @@ from mjlab.sensor import (
 from mjlab.tasks.eff_velocity import mdp
 from mjlab.tasks.eff_velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.eff_velocity.velocity_env_cfg import make_eff_velocity_env_cfg
-from mjlab.utils.noise import UniformNoiseCfg
 
 from .action_cfg import g1_residual_effort_action_cfg
-from .robot_cfg import get_g1_effort_robot_cfg
-
-_FULL_ACTOR_NOISE = {
-  "base_lin_vel": (-0.5, 0.5),
-  "base_ang_vel": (-0.2, 0.2),
-  "projected_gravity": (-0.05, 0.05),
-  "joint_pos": (-0.01, 0.01),
-  "joint_vel": (-1.5, 1.5),
-}
-
-
-def _scaled_actor_noise(scale: float) -> dict[str, tuple[float, float]]:
-  return {
-    term_name: (n_min * scale, n_max * scale)
-    for term_name, (n_min, n_max) in _FULL_ACTOR_NOISE.items()
-  }
-
-
-def _flat_effort_curriculum_stages() -> list[mdp.FlatEffortStage]:
-  def robust_stage(name: str, push_velocity: float) -> mdp.FlatEffortStage:
-    return {
-      "name": name,
-      "lin_vel_x": (-0.4, 0.6),
-      "lin_vel_y": (-0.25, 0.25),
-      "ang_vel_z": (-0.1, 0.1),
-      "rel_standing_envs": 0.2,
-      "push_velocity": push_velocity,
-      "observation_noise": _scaled_actor_noise(1.0),
-      "foot_friction": (0.3, 1.2),
-      "encoder_bias": (-0.015, 0.015),
-      "base_com": {
-        0: (-0.025, 0.025),
-        1: (-0.025, 0.025),
-        2: (-0.03, 0.03),
-      },
-    }
-
-  return [
-    {
-      "name": "static_balance",
-      "lin_vel_x": (0.0, 0.0),
-      "lin_vel_y": (0.0, 0.0),
-      "ang_vel_z": (0.0, 0.0),
-      "rel_standing_envs": 1.0,
-      "push_velocity": 0.0,
-      "observation_noise": _scaled_actor_noise(0.2),
-      "foot_friction": (0.7, 1.0),
-      "encoder_bias": (-0.003, 0.003),
-      "base_com": {
-        0: (-0.005, 0.005),
-        1: (-0.005, 0.005),
-        2: (-0.006, 0.006),
-      },
-    },
-    {
-      "name": "slow_locomotion",
-      "lin_vel_x": (-0.2, 0.3),
-      "lin_vel_y": (-0.1, 0.1),
-      "ang_vel_z": (-0.1, 0.1),
-      "rel_standing_envs": 0.5,
-      "push_velocity": 0.1,
-      "observation_noise": _scaled_actor_noise(0.5),
-      "foot_friction": (0.5, 1.1),
-      "encoder_bias": (-0.0075, 0.0075),
-      "base_com": {
-        0: (-0.0125, 0.0125),
-        1: (-0.0125, 0.0125),
-        2: (-0.015, 0.015),
-      },
-    },
-    robust_stage("flat_robust_push_0_2", 0.2),
-    robust_stage("flat_robust_push_0_3", 0.3),
-    robust_stage("flat_robust_push_0_4", 0.4),
-    robust_stage("flat_robust_push_0_5", 0.5),
-  ]
-
-
-def _configure_flat_effort_curriculum(cfg: ManagerBasedRlEnvCfg) -> None:
-  stages = _flat_effort_curriculum_stages()
-  initial_stage = stages[0]
-
-  twist_cmd = cfg.commands["twist"]
-  assert isinstance(twist_cmd, UniformVelocityCommandCfg)
-  twist_cmd.ranges.lin_vel_x = initial_stage["lin_vel_x"]
-  twist_cmd.ranges.lin_vel_y = initial_stage["lin_vel_y"]
-  twist_cmd.ranges.ang_vel_z = initial_stage["ang_vel_z"]
-  twist_cmd.rel_standing_envs = initial_stage["rel_standing_envs"]
-
-  for term_name, (n_min, n_max) in initial_stage["observation_noise"].items():
-    cfg.observations["actor"].terms[term_name].noise = UniformNoiseCfg(
-      n_min=n_min,
-      n_max=n_max,
-    )
-
-  push_cfg = cfg.events["push_robot"]
-  push_cfg.interval_range_s = (5.0, 5.0)
-  push_cfg.params["velocity_range"] = {
-    "x": (0.0, 0.0),
-    "y": (0.0, 0.0),
-    "z": (0.0, 0.0),
-    "roll": (0.0, 0.0),
-    "pitch": (0.0, 0.0),
-    "yaw": (0.0, 0.0),
-  }
-  cfg.events["foot_friction"].params["ranges"] = initial_stage["foot_friction"]
-  cfg.events["encoder_bias"].params["bias_range"] = initial_stage["encoder_bias"]
-  cfg.events["base_com"].params["ranges"] = dict(initial_stage["base_com"])
-
-  cfg.curriculum = {
-    "flat_effort_stages": CurriculumTermCfg(
-      func=mdp.FlatEffortCurriculum,
-      params={
-        "command_name": "twist",
-        "push_event_name": "push_robot",
-        "stages": stages,
-        "min_episodes": 4096,
-        "promotion_timeout_threshold": 0.95,
-        "demotion_timeout_threshold": 0.5,
-      },
-    )
-  }
+from .robot_cfg import EFFORT_STANDING_ROOT_HEIGHT, get_g1_effort_robot_cfg
 
 
 def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -272,6 +150,22 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.rewards["angular_momentum"].weight = -0.02
   cfg.rewards["air_time"].weight = 0.0
 
+  # Anti-fall penalties (native unitree G1 uses -10/-5/-2; tempered here because
+  # upright already soft-rewards orientation and residual-effort early training is harder).
+  cfg.rewards["base_height"] = RewardTermCfg(
+    func=mdp.base_height_l2,
+    weight=-5.0,
+    params={"target_height": EFFORT_STANDING_ROOT_HEIGHT},
+  )
+  cfg.rewards["flat_orientation"] = RewardTermCfg(
+    func=mdp.flat_orientation_l2,
+    weight=-2.0,
+  )
+  cfg.rewards["lin_vel_z"] = RewardTermCfg(
+    func=mdp.lin_vel_z_l2,
+    weight=-1.0,
+  )
+
   cfg.rewards["self_collisions"] = RewardTermCfg(
     func=mdp.self_collision_cost,
     weight=-1.0,
@@ -334,8 +228,6 @@ def unitree_g1_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     assert isinstance(twist_cmd, UniformVelocityCommandCfg)
     twist_cmd.ranges.lin_vel_x = (-1.5, 2.0)
     twist_cmd.ranges.ang_vel_z = (-0.7, 0.7)
-  else:
-    _configure_flat_effort_curriculum(cfg)
 
   return cfg
 

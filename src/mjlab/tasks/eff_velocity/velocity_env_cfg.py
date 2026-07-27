@@ -235,7 +235,7 @@ def make_eff_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       },
     ),
     "foot_friction": EventTermCfg(
-      mode="reset",
+      mode="startup",
       func=dr.geom_friction,
       params={
         "asset_cfg": SceneEntityCfg("robot", geom_names=()),  # Set per-robot.
@@ -245,7 +245,7 @@ def make_eff_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       },
     ),
     "encoder_bias": EventTermCfg(
-      mode="reset",
+      mode="startup",
       func=dr.encoder_bias,
       params={
         "asset_cfg": SceneEntityCfg("robot"),
@@ -253,7 +253,7 @@ def make_eff_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       },
     ),
     "base_com": EventTermCfg(
-      mode="reset",
+      mode="startup",
       func=dr.body_com_offset,
       params={
         "asset_cfg": SceneEntityCfg("robot", body_names=()),  # Set per-robot.
@@ -377,7 +377,7 @@ def make_eff_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
     "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
     "fell_over": TerminationTermCfg(
       func=mdp.bad_orientation,
-      params={"limit_angle": math.radians(70.0)},
+      params={"limit_angle": math.radians(45.0)},
     ),
     "out_of_terrain_bounds": TerminationTermCfg(
       func=mdp.out_of_terrain_bounds,
